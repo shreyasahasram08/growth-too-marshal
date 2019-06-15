@@ -6,8 +6,10 @@ from celery.task import PeriodicTask
 from celery.utils.log import get_task_logger
 from celery.local import PromiseProxy
 import numpy as np
+import glob
 import pyvo.dal
 import requests
+import sys
 
 from . import celery
 from .. import models
@@ -133,6 +135,7 @@ def ztf_depot(start_time=None, end_time=None):
         if len(deptable) == 0:
             continue
 
+
         obs_grouped_by_jd = deptable.group_by('jd').groups
         for jd, rows in zip(obs_grouped_by_jd.keys, obs_grouped_by_jd):
             obstime = time.Time(rows['jd'][0], format='jd').datetime
@@ -146,6 +149,7 @@ def ztf_depot(start_time=None, end_time=None):
                                        exposure_time=int(30),  # fixme
                                        filter_id=int(row['fid']),
                                        subfield_id=int(row['rcid']),
+                                       program_id=int(row['programid']),
                                        successful=1))
             subfield_ids = set(rows['rcid'])
             quadrant_ids = set(range(64))
@@ -159,9 +163,76 @@ def ztf_depot(start_time=None, end_time=None):
                                        exposure_time=int(30),  # fixme
                                        filter_id=int(row['fid']),
                                        subfield_id=int(missing_quadrant),
+                                       program_id=int(row['programid']),
                                        successful=0))
     models.db.session.commit()
 
+
+@celery.task(base=PeriodicTask, shared=False, run_every=3600)
+def ztf_depot_local(start_time=None, end_time=None):
+
+
+    if start_time is None:
+        start_time = time.Time.now() - time.TimeDelta(1.0*u.day)
+    if end_time is None:
+        end_time = time.Time.now()
+
+    # filenames = glob.glob('/Users/shreyaanand/local/190814/*.txt')
+    filenames=['/Users/shreyaanand/local/2019-08-14-2019-08-17_subdata.txt']
+    Nmissing_quadrants = []
+
+    for filename in filenames:
+        deptable = Table.read(filename, format='ascii.fixed_width',
+                              data_start=2, data_end=-1)
+
+        if len(deptable) == 0: continue
+        deptable = deptable.filled()
+        print(deptable)
+        # if not 'jd' in deptable: continue
+        obs_grouped_by_jd = deptable.group_by('jd').groups
+
+        for jd, rows in zip(obs_grouped_by_jd.keys, obs_grouped_by_jd):
+            obstime = time.Time(rows['jd'][0], format='jd').datetime
+            for row in rows:
+                # if obstime < start_time.datetime: continue
+                # elif obstime > (start_time + 3.0*u.day).datetime: continue
+                if (int(row['field']) > 879) and (int(row['field']) < 1001):
+                    continue
+                models.db.session.merge(
+                    models.Observation(telescope='ZTF',
+                                       field_id=int(row['field']),
+                                       observation_id=int(row['expid']),
+                                       obstime=obstime,
+                                       limmag=row['scimaglim'],
+                                       exposure_time=int(30),  # fixme
+                                       filter_id=int(row['fid']),
+                                       program_id=int(row['programid']),
+                                       subfield_id=int(row['rcid']),
+                                       successful=int(row['status'])))
+
+            subfield_ids = set(rows['rcid'])
+            quadrant_ids = set(range(64))
+            missing_quadrants = quadrant_ids - subfield_ids
+            Nmissing_quadrants.append(len(missing_quadrants))
+
+            for missing_quadrant in missing_quadrants:
+                if (int(rows['field'][0]) > 879) and (int(rows['field'][0]) < 1001):
+                    continue
+                models.db.session.merge(
+                    models.Observation(telescope='ZTF',
+                                       field_id=int(rows['field'][0]),
+                                       observation_id=int(row['expid']),
+                                       obstime=obstime,
+                                       exposure_time=int(30),  # fixme
+                                       filter_id=int(row['fid']),
+                                       program_id=int(row['programid']),
+                                       subfield_id=int(missing_quadrant),
+                                       successful=0))
+
+    models.db.session.commit()
+    Nmissing_quadrants = np.array(Nmissing_quadrants)
+    print(Nmissing_quadrants)
+    print(Nmissing_quadrants/64) #fraction of quadrants that are missing!
 
 def get_ztf_depot_table(url):
     with requests.get(url) as r:

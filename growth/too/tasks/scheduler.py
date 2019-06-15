@@ -205,7 +205,7 @@ def schedule_decam(json_data, queue_name):
         f.flush()
 
         dest = os.path.join(DECAM_PATH, queue_name + '.json')
-        subprocess.run(['scp', '-oBatchMode=yes', '-v', f.name, dest],
+        subprocess.run(['scp', '-i', '../../../secrets/id_rsa.pub' '-oBatchMode=yes', '-v', f.name, dest],
                        check=True)
 
 
