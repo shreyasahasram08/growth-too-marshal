@@ -50,34 +50,28 @@
                     <th rowspan=2>Area (deg<sup>2</sup>)</th>
                     <th rowspan=2>Probability</th>
                     <th rowspan=2>Limiting Magnitude [median]</th>
-                    <th rowspan=2>Program ID</th>
                 </tr>
               </thead>
               <tbody>
                     {% for filt in telescope.filters %} 
-                    <tr>
-                        {% for program_id in telescope.program_ids %}
                         <tr>
                             <td>{{filt}}</td>
-                            <td>{{ observation_list.starttime(filt,program_id,start_time,end_time)  }}</td>
-                            <td>{{ observation_list.nexp(filt,program_id,start_time,end_time) }}</td>
-                            <td>{{ observation_list.totaltime(filt,program_id,start_time,end_time) }}</td>
-                            <td>{{ "%.1f"|format(observation_list.area(filt,program_id,start_time,end_time)) }}</td>
-                            <td>{{ "%.5f"|format(100*observation_list.get_probability(filt,program_id,start_time,end_time)) }}</td>
-                            <td>{{ "%.1f"|format(observation_list.limmag(filt,program_id,start_time,end_time)) }}</td>
-                            <td>{{program_id}}
+                            <td>{{ observation_list.starttime(filt,start_time,end_time)  }}</td>
+                            <td>{{ observation_list.nexp(filt,start_time,end_time) }}</td>
+                            <td>{{ observation_list.totaltime(filt,start_time,end_time) }}</td>
+                            <td>{{ "%.1f"|format(observation_list.area(filt,start_time,end_time)) }}</td>
+                            <td>{{ "%.5f"|format(100*observation_list.get_probability(filt,start_time,end_time)) }}</td>
+                            <td>{{ "%.1f"|format(observation_list.limmag(filt,start_time,end_time)) }}</td>
                         </tr>
                         {% endfor %}
-                    </tr>
-                    {% endfor %}
                     <tr>
                         <td>All</td>
-                        <td>{{ observation_list.starttime("a",0,start_time,end_time)  }}</td>
-                        <td>{{ observation_list.nexp("a",0,start_time,end_time) }}</td>
-                        <td>{{ observation_list.totaltime("a",0,start_time,end_time) }}</td>
-                        <td>{{ "%.1f"|format(observation_list.area("a",0,start_time,end_time)) }}</td>
-                        <td>{{ "%.5f"|format(100*observation_list.get_probability("a",0,start_time,end_time)) }}</td>
-                        <td>{{ "%.1f"|format(observation_list.limmag("a",0,start_time,end_time)) }}</td>
+                        <td>{{ observation_list.starttime("a",start_time,end_time)  }}</td>
+                        <td>{{ observation_list.nexp("a",start_time,end_time) }}</td>
+                        <td>{{ observation_list.totaltime("a",start_time,end_time) }}</td>
+                        <td>{{ "%.1f"|format(observation_list.area("a",start_time,end_time)) }}</td>
+                        <td>{{ "%.5f"|format(100*observation_list.get_probability("a",start_time,end_time)) }}</td>
+                        <td>{{ "%.1f"|format(observation_list.limmag("a",start_time,end_time)) }}</td>
                         <td>All</td>
                     </tr>
             </tbody>

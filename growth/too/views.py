@@ -1303,29 +1303,20 @@ def observations(dateobs):
 
     telescope = form.telescope.data
     
-    telescope = 'ZTF'
+    # telescope = 'ZTF'
 
     # useful for testing the query
+    # start_time = time.Time('2019-09-30T14:34:08.00', format='isot')
+    # end_time = time.Time('2019-10-02T14:34:08.00', format='isot')    
 
-    start_time = time.Time('2019-10-31T21:23:31.00', format='isot')
-    end_time = time.Time('2019-11-02T21:23:31.00', format='isot')    
-
-    if telescope == 'ZTF': tasks.ztf_client.ztf_depot(start_time = start_time, end_time = end_time)
-    if telescope == 'DECam': tasks.decam_client.decam_obs(start_time = start_time, end_time = end_time)
+    # if telescope == 'ZTF': tasks.ztf_client.ztf_depot(start_time = start_time, end_time = end_time)
+    # if telescope == 'DECam': tasks.decam_client.decam_obs(start_time = start_time, end_time = end_time)
 
     start_time = 0.0
     end_time = 3.0   
 
     localization_name = models.Localization.query.filter_by(
         dateobs=dateobs).all()[-1].localization_name
-
-    # import sys
-    # observations = models.Observation.query.filter_by(telescope=telescope).all()
-    # for observation in observations:
-    #     if observation.field == 798:
-    #         print(observation.field, file=sys.stderr)
-    #         print(observation.successful, file=sys.stderr)
-    # print("stop")
 
     observation_list = models.ObservationList.query.filter_by(telescope=telescope,
                                                               dateobs=dateobs,
