@@ -23,6 +23,7 @@ import numpy as np
 from sqlalchemy.ext.associationproxy import association_proxy
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy_utils import EmailType, PhoneNumberType
+from tqdm import tqdm
 
 from .flask import app
 
@@ -59,103 +60,146 @@ def create_all():
             'filt': ['g', 'r', 'g'],
             'exposuretimes': [300.0, 300.0, 300.0],
             'doReferences': True,
+            'doUsePrimary': True,
+            'doBalanceExposure': False,
             'doDither': False,
             'usePrevious': False,
+            'doCompletedObservations': False,
+            'doPlannedObservations': False,
+            'cobs': [None, None],
             'schedule_type': 'greedy',
             'filterScheduleType': 'block',
             'airmass': 2.5,
             'schedule_strategy': 'tiling',
-            'mindiff': 30.*60.
+            'mindiff': 30.*60.,
+            'doMaxTiles': False,
+            'max_nb_tiles': 1000
         },
         'DECam': {
             'filt': ['g', 'z'],
             'exposuretimes': [25.0, 25.0],
             'doReferences': True,
+            'doUsePrimary': False,
+            'doBalanceExposure': False,
             'doDither': True,
             'usePrevious': False,
+            'doCompletedObservations': False,
+            'doPlannedObservations': False,
+            'cobs': [None, None],
             'schedule_type': 'greedy_slew',
             'filterScheduleType': 'integrated',
             'airmass': 2.5,
             'schedule_strategy': 'tiling',
-            'mindiff': 30.*60.
+            'mindiff': 30.*60.,
+            'doMaxTiles': False,
+            'max_nb_tiles': 1000
         },
         'Gattini': {
             'filt': ['J'],
             'exposuretimes': [300.0],
             'doReferences': False,
+            'doUsePrimary': False,
+            'doBalanceExposure': False,
             'doDither': False,
             'usePrevious': False,
+            'doCompletedObservations': False,
+            'doPlannedObservations': False,
+            'cobs': [None, None],
             'schedule_type': 'greedy',
             'filterScheduleType': 'block',
             'airmass': 2.5,
             'schedule_strategy': 'tiling',
-            'mindiff': 30.*60.
+            'mindiff': 30.*60.,
+            'doMaxTiles': False,
+            'max_nb_tiles': 1000
         },
         'KPED': {
             'filt': ['r'],
             'exposuretimes': [300.0],
             'doReferences': False,
+            'doUsePrimary': False,
+            'doBalanceExposure': False,
             'doDither': False,
             'usePrevious': False,
+            'doCompletedObservations': False,
+            'doPlannedObservations': False,
+            'cobs': [None, None],
             'schedule_type': 'greedy',
             'filterScheduleType': 'integrated',
             'airmass': 2.5,
             'schedule_strategy': 'catalog',
-            'mindiff': 30.*60.
+            'mindiff': 30.*60.,
+            'doMaxTiles': False,
+            'max_nb_tiles': 1000
         },
         'GROWTH-India': {
             'filt': ['r'],
             'exposuretimes': [300.0],
             'doReferences': False,
+            'doUsePrimary': False,
+            'doBalanceExposure': False,
             'doDither': False,
             'usePrevious': False,
+            'doCompletedObservations': False,
+            'doPlannedObservations': False,
+            'cobs': [None, None],
             'schedule_type': 'greedy',
             'filterScheduleType': 'integrated',
             'airmass': 2.5,
             'schedule_strategy': 'catalog',
-            'mindiff': 30.*60.
+            'mindiff': 30.*60.,
+            'doMaxTiles': False,
+            'max_nb_tiles': 1000
         }
     }
 
-    for tele in telescopes:
+    with tqdm(telescopes) as telescope_progress:
+        for tele in telescope_progress:
+            telescope_progress.set_description('populating {}'.format(tele))
 
-        filename = \
-            pkg_resources.resource_filename(__name__, 'input/%s.ref' % tele)
-        if os.path.isfile(filename):
-            refstable = table.Table.read(filename,
-                                         format='ascii', data_start=2,
-                                         data_end=-1)
-            refs = table.unique(refstable, keys=['field', 'fid'])
-            if "maglimcat" not in refs.columns:
-                refs["maglimcat"] = np.nan
+            filename = pkg_resources.resource_filename(
+                __name__, 'input/%s.ref' % tele)
+            if os.path.isfile(filename):
+                refstable = table.Table.read(
+                    filename, format='ascii', data_start=2, data_end=-1)
+                refs = table.unique(refstable, keys=['field', 'fid'])
+                if "maglimcat" not in refs.columns:
+                    refs["maglimcat"] = np.nan
 
-            reference_images = \
-                {group[0]['field']: group['fid'].astype(int).tolist()
-                 for group in refs.group_by('field').groups}
-            reference_mags = \
-                {group[0]['field']: group['maglimcat'].tolist()
-                 for group in refs.group_by('field').groups}
+                reference_images = {
+                    group[0]['field']: group['fid'].astype(int).tolist()
+                    for group in refs.group_by('field').groups}
+                reference_mags = {
+                    group[0]['field']: group['maglimcat'].tolist()
+                    for group in refs.group_by('field').groups}
 
-        else:
-            reference_images = {}
-            reference_mags = {}
+            else:
+                reference_images = {}
+                reference_mags = {}
 
-        tessfile = pkg_resources.resource_stream(__name__,
-                                                 'input/%s.tess' % tele)
-        configfile = pkg_resources.resource_stream(__name__,
-                                                   'config/%s.config' % tele)
-        with tessfile as f, configfile as g:
+            tesspath = 'input/%s.tess' % tele
+            try:
+                tessfile = app.open_instance_resource(tesspath)
+            except IOError:
+                tessfile = pkg_resources.resource_stream(__name__, tesspath)
+            tessfilename = tessfile.name
+            tessfile.close()
+            fields = np.recfromtxt(
+                tessfilename, usecols=range(3),
+                names=['field_id', 'ra', 'dec'])
 
-            config_struct = {}
-            for line in g.readlines():
-                line_without_return = line.decode().split("\n")
-                line_split = line_without_return[0].split(" ")
-                line_split = list(filter(None, line_split))
-                if line_split:
-                    try:
-                        config_struct[line_split[0]] = float(line_split[1])
-                    except ValueError:
-                        config_struct[line_split[0]] = line_split[1]
+            with pkg_resources.resource_stream(
+                    __name__, 'config/%s.config' % tele) as g:
+                config_struct = {}
+                for line in g.readlines():
+                    line_without_return = line.decode().split("\n")
+                    line_split = line_without_return[0].split(" ")
+                    line_split = list(filter(None, line_split))
+                    if line_split:
+                        try:
+                            config_struct[line_split[0]] = float(line_split[1])
+                        except ValueError:
+                            config_struct[line_split[0]] = line_split[1]
 
             db.session.merge(Telescope(telescope=tele,
                                        lat=config_struct["latitude"],
@@ -165,10 +209,7 @@ def create_all():
                                        filters=available_filters[tele],
                                        default_plan_args=plan_args[tele]))
 
-            fields = np.recfromtxt(
-                f, usecols=range(3), names=['field_id', 'ra', 'dec'])
-
-            for field_id, ra, dec in fields:
+            for field_id, ra, dec in tqdm(fields, 'populating fields'):
                 ref_filter_ids = reference_images.get(field_id, [])
                 ref_filter_mags = []
                 for val in reference_mags.get(field_id, []):
@@ -228,7 +269,9 @@ def create_all():
                 quadrant_xyz = np.moveaxis(
                     quadrant_coords_icrs.cartesian.xyz.value, 0, -1)
 
-                for field_id, xyz in zip(fields['field_id'], quadrant_xyz):
+                for field_id, xyz in zip(
+                        tqdm(fields['field_id'], 'populating subfields'),
+                        quadrant_xyz):
                     for ii, xyz in enumerate(xyz):
                         ipix = hp.query_polygon(Localization.nside, xyz)
                         db.session.merge(SubField(telescope=tele,
@@ -291,6 +334,7 @@ class Event(db.Model):
 
     _tags = db.relationship(
         lambda: Tag,
+        lazy='selectin',
         order_by=lambda: (
             db.func.lower(Tag.text).notin_({'fermi', 'swift', 'amon', 'lvc'}),
             db.func.lower(Tag.text).notin_({'long', 'short'}),
@@ -630,8 +674,7 @@ class Localization(db.Model):
     def table_2d(self):
         """Get multiresolution HEALPix dataset, probability density only."""
         return table.Table(
-            [np.asarray(self.uniq, dtype=np.uint64), self.probdensity],
-            names=['UNIQ', 'PROBDENSITY'])
+            [self.uniq, self.probdensity], names=['UNIQ', 'PROBDENSITY'])
 
     @property
     def table(self):
@@ -640,7 +683,7 @@ class Localization(db.Model):
         if self.is_3d:
             return table.Table(
                 [
-                    np.asarray(self.uniq, dtype=np.uint64),
+                    self.uniq,
                     self.probdensity, self.distmu,
                     self.distsigma, self.distnorm],
                 names=[
@@ -732,10 +775,15 @@ class Plan(db.Model):
         else:
             return None
 
-    @property
+    @hybrid_property
     def num_observations(self):
         """Number of planned observation."""
         return len(self.planned_observations)
+
+    @num_observations.expression
+    def num_observations(cls):
+        """Number of planned observation."""
+        return cls.planned_observations.count()
 
     @property
     def num_observations_per_filter(self):
@@ -927,77 +975,142 @@ class Observation(db.Model):
         comment='subfield (e.g. quadrant/chip as relevant for instrument')
 
     successful = db.Column(
-         db.Boolean,
-         nullable=False,
-         comment='processed successfully?')
+        db.Boolean,
+        nullable=False,
+        comment='processed successfully?')
 
 
-class LocalizationObservability(db.Model):
+class Candidate(db.Model):
 
-    __table_args__ = (
-        db.ForeignKeyConstraint(
-            ['dateobs',
-             'localization_name'],
-            ['localization.dateobs',
-             'localization.localization_name']
-        ),
-    )
+    name = db.Column(
+        db.String,
+        primary_key=True,
+        comment='Candidate name')
+
+    growth_marshal_id = db.Column(
+        db.String,
+        unique=True, nullable=False,
+        comment='GROWTH marshal ID')
+
+    subfield_id = db.Column(
+        db.Integer,
+        nullable=True,
+        comment='Readout channel ID')
+
+    creationdate = db.Column(
+        db.DateTime,
+        comment='Date of candidate creation')
+
+    classification = db.Column(
+        db.String,
+        nullable=True,
+        comment='Classification')
+
+    redshift = db.Column(
+        db.Float,
+        nullable=True,
+        comment='Resdshift of the source')
+
+    iauname = db.Column(
+        db.String,
+        nullable=True,
+        comment='IAU name on TNS')
+
+    field_id = db.Column(
+        db.Integer,
+        comment='Field ID')
+
+    candid = db.Column(
+        db.BigInteger,
+        comment='Candidate ID')
+
+    ra = db.Column(
+        db.Float,
+        nullable=False,
+        comment='RA of the candidate')
+
+    dec = db.Column(
+        db.Float,
+        nullable=False,
+        comment='Dec of the candidate')
+
+    last_updated = db.Column(
+        db.DateTime,
+        nullable=False,
+        comment='Date of last update')
+
+    autoannotations = db.Column(
+        db.String,
+        nullable=True,
+        comment='Autoannotations from the GROWTH marshal')
+
+    photometry = db.relationship(
+        lambda: CandidatePhotometry,
+        backref='candidate',
+        order_by=lambda: CandidatePhotometry.dateobs)
+
+    @hybrid_property
+    def first_detection_time(self):
+        return self.photometry[0].dateobs
+
+    @first_detection_time.expression
+    def first_detection_time(cls):
+        return db.select(
+            [db.func.min(cls.dateobs)]
+        ).where(
+            CandidatePhotometry.name == cls.name
+        ).label(__name__)
+
+
+class CandidatePhotometry(db.Model):
+    """Candidate light curve pulled from the GROWTH
+    Marshal"""
+
+    lcid = db.Column(
+        db.BigInteger,
+        primary_key=True)
+
+    name = db.Column(
+        db.ForeignKey(Candidate.name),
+        nullable=False,
+        comment='Candidate name')
 
     dateobs = db.Column(
         db.DateTime,
-        db.ForeignKey(Event.dateobs),
-        primary_key=True,
-        comment='UTC event timestamp')
+        nullable=True,
+        comment='Observation date')
 
-    localization_name = db.Column(
+    fil = db.Column(
         db.String,
-        primary_key=True,
-        comment='Localization name')
+        nullable=True,
+        comment='Filter')
 
-    date = db.Column(
-        db.DateTime,
-        primary_key=True,
-        comment='UTC date')
-
-    segment_list = db.deferred(db.Column(
-        db.ARRAY(db.Float),
-        nullable=False,
-        comment='Accessible times (total)'))
-
-    airmass = db.deferred(db.Column(
-        db.LargeBinary,
-        comment='Airmass chart'))
-
-
-class PlanObservability(db.Model):
-
-    dateobs = db.Column(
-        db.DateTime,
-        db.ForeignKey(Event.dateobs),
-        primary_key=True,
-        comment='UTC event timestamp')
-
-    telescope = db.Column(
+    instrument = db.Column(
         db.String,
-        db.ForeignKey(Telescope.telescope),
-        primary_key=True,
-        comment='Telescope')
+        nullable=True,
+        comment='Instruments')
 
-    plan_name = db.Column(
-        db.String,
-        primary_key=True,
-        comment='Plan name')
+    limmag = db.Column(
+        db.Float,
+        nullable=True,
+        comment='Limiting magnitude')
 
-    date = db.Column(
-        db.DateTime,
-        primary_key=True,
-        comment='UTC date')
+    mag = db.Column(
+        db.Float,
+        nullable=True,
+        comment='Mag PSF')
 
-    segment_list = db.deferred(db.Column(
-        db.ARRAY(db.Float),
-        nullable=False,
-        comment='Accessible times (total)'))
+    magerr = db.Column(
+        db.Float,
+        nullable=True,
+        comment='Mag uncertainty')
 
-    airmass = db.deferred(db.Column(
-        db.LargeBinary,
-        comment='Airmass chart'))
+    exptime = db.Column(
+        db.Float,
+        nullable=True,
+        comment='Exposure time')
+
+    programid = db.Column(
+        db.Integer,
+        nullable=True,
+        comment='Program ID number (1,2,3)')

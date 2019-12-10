@@ -1,31 +1,26 @@
-import sys
-import warnings
 import datetime
+import json
 import os
 import urllib.parse
 import math
-from io import StringIO
 import re
 import requests
 import shutil
 import tempfile
-import pkg_resources
 
 from celery import group
 import numpy as np
-from scipy.stats import norm
 from astropy import time
 import astropy.units as u
 from astropy.coordinates import SkyCoord
-from astropy.table import Table
-from astropy_healpix import HEALPix
 import pandas as pd
-import h5py
 from ligo.skymap import io
+from ligo.skymap.postprocess import find_injection_moc
 from ligo.skymap.tool.ligo_skymap_plot_airmass import main as plot_airmass
 from ligo.skymap.tool.ligo_skymap_plot_observability import main \
     as plot_observability
 import matplotlib.style
+import pkg_resources
 
 from flask import (
     abort, flash, jsonify, make_response, redirect, render_template, request,
@@ -38,12 +33,12 @@ from wtforms_components.fields import (
     DateTimeField, DecimalSliderField, SelectField)
 from wtforms import validators
 from passlib.apache import HtpasswdFile
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm.exc import MultipleResultsFound, NoResultFound
 
 from .flask import app
 from .jinja import atob
-from . import models, tasks
+from . import catalogs, models, tasks
+from ._version import get_versions
 
 #
 #
@@ -95,30 +90,6 @@ def load_user(user_id):
     # the database. Once the htpasswd file goes away, drop everything after
     # the `or`.
     return models.User.query.get(user_id) or models.User(name=user_id)
-
-
-def get_marshallink(dateobs):
-
-    try:
-        from . import growthdb
-    except OperationalError:
-        warnings.warn('growth-db does not appear to be accessible.')
-        return 'None'
-    else:
-        event = models.Event.query.filter_by(dateobs=dateobs).all()
-        if len(event) == 0 or event is None:
-            return 'None'
-        else:
-            event = event[0]
-            scienceprogram = None
-            if 'Fermi' in event.tags:
-                scienceprogram = 'GBM'
-            elif 'GW' in event.tags:
-                scienceprogram = \
-                    'Electromagnetic Counterparts to Gravitational Waves'
-            elif 'AMON' in event.tags:
-                scienceprogram = 'IceCube'
-            return growthdb.get_marshallink(current_user.name, scienceprogram)
 
 
 def human_time(*args, **kwargs):
@@ -264,16 +235,14 @@ def event(dateobs):
         return redirect(url_for('event', dateobs=event.dateobs))
 
     return render_template(
-        'event.html', event=models.Event.query.get_or_404(dateobs),
-        marshallink=get_marshallink(dateobs))
+        'event.html', event=models.Event.query.get_or_404(dateobs))
 
 
 @app.route('/event/<datetime:dateobs>/objects')
 @login_required
 def objects(dateobs):
     return render_template(
-        'objects.html', event=models.Event.query.get_or_404(dateobs),
-        marshallink=get_marshallink(dateobs))
+        'objects.html', event=models.Event.query.get_or_404(dateobs))
 
 
 @app.route('/event/<datetime:dateobs>/plan', methods=['GET', 'POST'])
@@ -311,7 +280,8 @@ def plan(dateobs):
             group(
                 group(
                     tasks.scheduler.submit.s(telescope, plan_name),
-                    tasks.email.compose_too.s(telescope, plan_name)
+                    tasks.email.compose_too.si(telescope, plan_name),
+                    tasks.slack.slack_too.si(telescope, plan_name)
                 )
                 for telescope, plan_name in plans
             ).delay(dateobs)
@@ -432,6 +402,26 @@ class PlanForm(ModelForm):
 
     references = BooleanField(default=False)
 
+    primary = BooleanField(default=False)
+
+    balance = BooleanField(default=False)
+
+    completed = BooleanField(default=False)
+
+    completed_window_start = DateTimeField(
+        format='%Y-%m-%d %H:%M:%S',
+        default=lambda: datetime.datetime.utcnow() - datetime.timedelta(1),
+        validators=[validators.DataRequired()])
+
+    completed_window_end = DateTimeField(
+        format='%Y-%m-%d %H:%M:%S',
+        default=lambda: datetime.datetime.utcnow(),
+        validators=[validators.DataRequired()])
+
+    planned = BooleanField(default=False)
+
+    maxtiles = BooleanField(default=False)
+
     filterschedule = RadioField(
         choices=[('block', 'block'), ('integrated', 'integrated')],
         default='block')
@@ -443,6 +433,10 @@ class PlanForm(ModelForm):
     exposure_time = FloatField(
         default=300,
         validators=[validators.DataRequired(), validators.NumberRange(min=0)])
+
+    max_nb_tiles = DecimalSliderField(
+        [validators.NumberRange(min=0, max=1000)],
+        default=1000)
 
     probability = DecimalSliderField(
         [validators.NumberRange(min=0, max=100)],
@@ -502,6 +496,9 @@ class PlanForm(ModelForm):
         timediff1 = start_mjd - event_mjd
         timediff2 = end_mjd - event_mjd
         t_obs = [timediff1, timediff2]
+        completed_start_mjd = time.Time(self.completed_window_start.data).mjd
+        completed_end_mjd = time.Time(self.completed_window_end.data).mjd
+        c_obs = [completed_start_mjd, completed_end_mjd]
         filters = re.split(r'[\s,]+', self.filters.data)
 
         obj.plan_args = dict(
@@ -515,10 +512,17 @@ class PlanForm(ModelForm):
             schedule_type=self.schedule.data,
             doDither=self.dither.data,
             doReferences=self.references.data,
+            doUsePrimary=self.primary.data,
+            doBalanceExposure=self.balance.data,
             filterScheduleType=self.filterschedule.data,
             schedule_strategy=self.schedule_strategy.data,
             usePrevious=self.previous.data,
-            previous_plan=self.previous_plan.data
+            previous_plan=self.previous_plan.data,
+            doCompletedObservations=self.completed.data,
+            cobs=c_obs,
+            doPlannedObservations=self.planned.data,
+            doMaxTiles=self.maxtiles.data,
+            max_nb_tiles=int(self.max_nb_tiles.data)
         )
 
 
@@ -588,6 +592,14 @@ class PlanManualForm(ModelForm):
         validators=[validators.DataRequired()],
         default='REPLACE ME')
 
+    subprogram_name = TextField(
+        validators=[validators.DataRequired()],
+        default='GW')
+
+    program_id = SelectField(default='Partnership',
+                             choices=[('2', 'Partnership'),
+                                      ('3', 'Caltech')])
+
     def validate_validity_window_end(self, field):
         other = self.validity_window_start
         if field.validate(self) and other.validate(self):
@@ -624,6 +636,8 @@ def plan_manual():
                 tasks.scheduler.submit_manual.s(
                     telescope, json_data, queue_name),
                 tasks.email.compose_too.s(
+                    telescope, queue_name),
+                tasks.slack.slack_too.s(
                     telescope, queue_name)
             ).delay()
 
@@ -808,94 +822,6 @@ def get_ztf_cand(url_report_page, username, password):
     return name_, ra_transient, dec_transient
 
 
-@app.route('/event/<datetime:dateobs>/localization/<localization_name>/galaxy')
-@login_required
-def localization_galaxy(dateobs, localization_name):
-    localization = one_or_404(
-        models.Localization.query
-        .filter_by(dateobs=dateobs, localization_name=localization_name))
-
-    h5file = pkg_resources.resource_filename(__name__, 'catalog/CLU.hdf5')
-    with h5py.File(h5file, 'r') as f:
-        name = f['name'][:]
-        ra, dec = f['ra'][:], f['dec'][:]
-        sfr_fuv, mstar = f['sfr_fuv'][:], f['mstar'][:]
-        distmpc, magb = f['distmpc'][:], f['magb'][:]
-        a, b2a, pa = f['a'][:], f['b2a'][:], f['pa'][:]
-        btc = f['btc'][:]
-
-    idx = np.where(distmpc >= 0)[0]
-    ra, dec = ra[idx], dec[idx]
-    sfr_fuv, mstar = sfr_fuv[idx], mstar[idx]
-    distmpc, magb = distmpc[idx], magb[idx]
-    a, b2a, pa = a[idx], b2a[idx], pa[idx]
-    btc = btc[idx]
-
-    galaxy_coords = SkyCoord(ra * u.deg, dec * u.deg, distmpc * u.Mpc)
-    prob = np.array(localization.healpix)
-    nside = localization.nside
-    pixarea = 4 * np.pi / len(prob)
-
-    if localization.distmu is None:
-        is3d = False
-    else:
-        is3d = True
-
-    distmu = np.array(localization.distmu)
-    distsigma = np.array(localization.distsigma)
-    distnorm = np.array(localization.distnorm)
-
-    # Find the posterior probability density at the position of each galaxy.
-    hpx = HEALPix(nside=nside, frame='icrs')
-    idx = hpx.skycoord_to_healpix(galaxy_coords)
-
-    if is3d:
-        dp_dv = norm(distmu[idx], distsigma[idx]).pdf(
-                     galaxy_coords.distance.value) \
-                     * prob[idx] * distnorm[idx] / pixarea
-        dp_dv = np.array(dp_dv)
-    else:
-        dp_dv = prob[idx]
-
-    # FIXME: Need sensible priority
-    priority = dp_dv * 1.0
-    priority[np.where(np.isnan(priority))[0]] = -np.inf
-    idxsort = np.argsort(priority)[::-1]
-
-    data_rows = []
-    for ii in range(50):
-        idx = idxsort[ii]
-        c = SkyCoord(ra=ra[idx]*u.degree, dec=dec[idx]*u.degree,
-                     frame='icrs')
-
-        ra_hex = c.ra.to_string(unit=u.hour, sep=':')
-        dec_hex = c.dec.to_string(unit=u.degree, sep=':')
-
-        data_rows.append((ii+1, name[idx], ra_hex, dec_hex,
-                          sfr_fuv[idx], mstar[idx],
-                          distmpc[idx], magb[idx], prob[idx], priority[idx]))
-
-    names = ('ID', 'NAME', 'RA', 'DEC', 'SFR FUV', 'Mstar', 'DIST (Mpc)',
-             'MAG', 'PROB', 'PRIORITY')
-
-    if not data_rows:
-        galaxy_table = ""
-    else:
-        t = Table(rows=data_rows, names=names)
-        old_stdout = sys.stdout
-        sys.stdout = mystdout = StringIO()
-        t.write(format='ascii.csv', delimiter=',', filename=sys.stdout,
-                formats={'SFR FUV': '%.3e', 'Mstar': '%.3e',
-                         'DIST (Mpc)': '%.1f', 'MAG': '%.1f',
-                         'PROB': '%.3e', 'PRIORITY': '%.3e'})
-        sys.stdout = old_stdout
-        galaxy_table = "\n".join(mystdout.getvalue().split("\n")[1:])
-
-    return render_template('galaxy.html', dateobs=dateobs,
-                           localization=localization,
-                           galaxy_table=galaxy_table)
-
-
 @app.route('/event/<datetime:dateobs>/localization/<localization_name>/json')
 @login_required
 @cache.cached()
@@ -906,6 +832,141 @@ def localization_json(dateobs, localization_name):
     if localization.contour is None:
         abort(404)
     return jsonify(localization.contour)
+
+
+def nan_to_none(o):
+    if o != o:
+        return None
+    else:
+        return o
+
+
+@app.route('/event/<datetime:dateobs>/galaxies/json')
+@login_required
+def galaxies_data(dateobs):
+    event = models.Event.query.get_or_404(dateobs)
+    table = catalogs.galaxies.copy()
+
+    # Populate 2D and 3D credible levels.
+    localization_name = request.args.get('search[value]')
+    localization = (
+        models.Localization.query.filter_by(
+            dateobs=event.dateobs,
+            localization_name=localization_name
+        ).one_or_none() or event.localizations[-1])
+    results = find_injection_moc(
+        localization.table,
+        table['ra'].to(u.rad).value,
+        table['dec'].to(u.rad).value,
+        table['distmpc'].to(u.Mpc).value)
+    table['2D CL'][:] = np.ma.masked_invalid(results.searched_prob) * 100
+    table['3D CL'][:] = np.ma.masked_invalid(results.searched_prob_vol) * 100
+    table['2D pdf'][:] = np.ma.masked_invalid(results.probdensity)
+    table['3D pdf'][:] = np.ma.masked_invalid(results.probdensity_vol)
+
+    result = {}
+
+    # Populate total number of records.
+    result['recordsTotal'] = len(table)
+
+    # Populate draw counter.
+    try:
+        value = int(request.args['draw'])
+    except KeyError:
+        pass
+    except ValueError:
+        abort(400)
+    else:
+        result['draw'] = value
+
+    for i in range(len(table.columns)):
+        try:
+            value = json.loads(
+                request.args['columns[{}][search][value]'.format(i)] or '{}'
+            )
+        except (KeyError, ValueError):
+            pass
+        else:
+            try:
+                value2, = np.asarray(
+                    [value['min']], dtype=table[table.colnames[i]].dtype)
+            except KeyError:
+                pass
+            except ValueError:
+                abort(400)
+            else:
+                table = table[table[table.colnames[i]] >= value2]
+
+            try:
+                value2, = np.asarray(
+                    [value['max']], dtype=table[table.colnames[i]].dtype)
+            except (KeyError, ValueError):
+                pass
+            else:
+                table = table[table[table.colnames[i]] <= value2]
+
+        try:
+            value = int(request.args['order[{}][column]'.format(i)])
+        except (KeyError, ValueError):
+            pass
+        else:
+            table.sort(table.colnames[value])
+
+        try:
+            value = request.args['order[{}][dir]'.format(i)]
+        except (KeyError, ValueError):
+            pass
+        else:
+            if value == 'desc':
+                table.reverse()
+
+    # Populate total number of filtered records.
+    result['recordsFiltered'] = len(table)
+
+    # Trim results by requested start index.
+    try:
+        value = int(request.args['start'])
+    except KeyError:
+        pass
+    except ValueError:
+        abort(400)
+    else:
+        table = table[value:]
+
+    # Trim results by requested length.
+    try:
+        value = int(request.args['length'])
+    except KeyError:
+        pass
+    except ValueError:
+        abort(400)
+    else:
+        table = table[:value]
+
+    result['data'] = list(
+        zip(
+            *(
+                (
+                    None if item == '--' else item
+                    for item in table.formatter._pformat_col_iter(
+                        column, max_lines=-1, show_name=False,
+                        show_unit=False, outs={}
+                    )
+                )
+                for column in table.columns.values()
+            )
+        )
+    )
+
+    return jsonify(result)
+
+
+@app.route('/event/<datetime:dateobs>/galaxies')
+@login_required
+def galaxies(dateobs):
+    event = models.Event.query.get_or_404(dateobs)
+    return render_template(
+        'galaxies.html', event=event, table=catalogs.galaxies)
 
 
 def get_queue_transient_name(plan):
@@ -935,6 +996,9 @@ def get_json_data_manual(form):
     doReferences = bool(form.references.data)
     exposure_time = form.exposure_time.data
     queue_name = form.queue_name.data
+    subprogram_name = form.subprogram_name.data
+    username = current_user.name
+    program_id = int(form.program_id.data)
 
     start_mjd = time.Time(form.validity_window_start.data).mjd
     end_mjd = time.Time(form.validity_window_end.data).mjd
@@ -943,7 +1007,6 @@ def get_json_data_manual(form):
                    'Gattini': 'Kasliwal', 'KPED': 'Coughlin',
                    'GROWTH-India': 'Bhalerao'}
 
-    program_id = 2
     bands = {'g': 1, 'r': 2, 'i': 3, 'z': 4, 'J': 5}
     json_data = {'queue_name': "ToO_" + queue_name,
                  'validity_window_mjd': [start_mjd, end_mjd]}
@@ -964,8 +1027,8 @@ def get_json_data_manual(form):
                       'dec': field.dec,
                       'filter_id': filter_id,
                       'exposure_time': exposure_time,
-                      'program_pi': program_pis[telescope],
-                      'subprogram_name': "ToO_manual"
+                      'program_pi': program_pis[telescope] + '/' + username,
+                      'subprogram_name': "ToO_" + subprogram_name
                       }
             targets.append(target)
             cnt = cnt + 1
@@ -1004,7 +1067,7 @@ def get_json_data_manual(form):
     return json_data, queue_name
 
 
-def get_json_data(plan):
+def get_json_data(plan, decam_style=True):
 
     queue_name, transient_name = get_queue_transient_name(plan)
 
@@ -1065,7 +1128,7 @@ def get_json_data(plan):
             ]
         }
 
-    if telescope == "DECam":
+    if (telescope == "DECam") and decam_style:
         decam_dicts = []
         cnt = 1
         queue_name = json_data['queue_name']
@@ -1196,17 +1259,16 @@ def health_queue(telescope):
     return '', 204  # No Content
 
 
-@app.route('/health/growth-marshal')
-def health_growth_marshal():
-    """Check connectivity with the GROWTH Marshal.
-    Returns an HTTP 204 No Content response on success,
-    or an HTTP 500 Internal Server Error response on failure.
-    """
-    from . import growthdb  # noqa: F401
-    return '', 204  # No Content
-
-
 @app.route('/health')
 @login_required
 def health():
     return render_template('health.html', telescopes=models.Telescope.query)
+
+
+@app.route('/about')
+@login_required
+def about():
+    return render_template(
+        'about.html',
+        packages=pkg_resources.working_set,
+        versions=get_versions())
