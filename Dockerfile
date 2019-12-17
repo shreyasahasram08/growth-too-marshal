@@ -3,18 +3,12 @@
 # Build Python wheels for dependencies that are not in apt or PyPI.
 #
 
-FROM quay.io/pypa/manylinux1_x86_64 AS wheel-deps
+FROM quay.io/pypa/manylinux2010_x86_64 AS wheel-deps
 
 RUN /opt/python/cp37-cp37m/bin/pip wheel --no-deps --no-cache-dir \
     lscsoft-glue \
     ligo-segments \
     python-ligo-lw \
-    # Fixes for flaky IERS servers that are on master but not yet in an astropy release
-    git+https://github.com/astropy/astropy@90db3ade9f5d883fedbe2a2e42b77938d5cc318e \
-    git+https://github.com/astropy/astroplan@fa5fde10aab7b1720a13669bb214783dea8c5abb \
-    git+https://github.com/astropy/astroquery@c96d5f4f306eee44f59de96e77d6f34bc4d784bb \
-    git+https://github.com/astropy/reproject@eea092eb476c8aef95c917e1250b7796923e47f1 \
-    git+https://github.com/astropy/pyvo@33f64f9d4a5ab05dac12339d69c6b7c4bcf660e2 \
     git+https://github.com/mher/flower@1a291b31423faa19450a272c6ef4ef6fe8daa286 && \
     # Audit all binary wheels
     ls *.whl | xargs -L 1 auditwheel repair && \
@@ -28,7 +22,7 @@ RUN /opt/python/cp37-cp37m/bin/pip wheel --no-deps --no-cache-dir \
 # Stage 2: wheel-self
 # Build a Python wheel for this package itself.
 #
-FROM quay.io/pypa/manylinux1_x86_64 AS wheel-self
+FROM quay.io/pypa/manylinux2010_x86_64 AS wheel-self
 COPY . /src
 RUN /opt/python/cp37-cp37m/bin/pip wheel --no-deps --no-cache-dir -w /wheelhouse /src
 
@@ -47,7 +41,6 @@ RUN apt-get update && apt-get -y install --no-install-recommends \
     gunicorn3 \
     openssh-client \
     python3-astropy \
-    python3-astroquery \
     python3-celery \
     python3-dateutil \
     python3-ephem \
@@ -71,7 +64,6 @@ RUN apt-get update && apt-get -y install --no-install-recommends \
     python3-pip \
     python3-psycopg2 \
     python3-redis \
-    python3-reproject \
     python3-scipy \
     python3-seaborn \
     python3-setuptools \
@@ -81,8 +73,7 @@ RUN apt-get update && apt-get -y install --no-install-recommends \
     python3-tornado \
     python3-twilio \
     python3-tz \
-    python3-wtforms \
-    python3-pyvo && \
+    python3-wtforms && \
     rm -rf /var/lib/apt/lists/* && \
     pip3 install --upgrade --no-cache-dir pip
 
@@ -101,7 +92,6 @@ COPY --from=wheel-deps /wheelhouse /wheelhouse
 RUN pip3 install --no-cache-dir -f /wheelhouse \
     flower \
     -r /requirements.txt
-RUN pip3 install --no-cache-dir /wheelhouse/*.whl
 
 
 #
