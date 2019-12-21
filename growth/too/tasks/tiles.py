@@ -524,7 +524,9 @@ def tile(localization_name, dateobs, telescope,
                            doMaxTiles=maxtiles,
                            max_nb_tiles=plan_args['max_nb_tiles'],
                            doRASlice=plan_args['doRASlice'],
-                           raslice=plan_args['raslice'])
+                           raslice=plan_args['raslice'],
+                           doBalanceExposure=plan_args['doBalanceExposure'],
+                           airmass=plan_args['airmass'])
 
     params['map_struct'] = dict(
         zip(['prob', 'distmu', 'distsigma', 'distnorm'], localization.flat))
